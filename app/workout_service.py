@@ -1,3 +1,5 @@
+"""Validation and orchestration for workout operations."""
+
 from datetime import date
 from typing import Optional
 from database import EnduranceDetails, Workout, get_workouts, save_workout
@@ -5,6 +7,7 @@ from database import EnduranceDetails, Workout, get_workouts, save_workout
 SUPPORTED_SPORTS = ("Run", "Bike", "Swim", "Gym")
 ENDURANCE_SPORTS = ("Run", "Bike", "Swim")
 
+# validate and persist a workout record, including optional endurance metadata
 def log_workout(
     workout_date: date,
     sport: str,
@@ -34,6 +37,7 @@ def log_workout(
     )
     endurance_details = None
 
+    # validate endurance details if the sport is an endurance sport
     if sport in ENDURANCE_SPORTS:
         if distance is None or distance <= 0:
             raise ValueError("Distance must be greater than zero.")
@@ -67,5 +71,6 @@ def log_workout(
     )
     return save_workout(workout, endurance_details)
 
+# expose workout history without leaking persistence into the UI
 def get_workout_history() -> list[tuple[Workout, Optional[EnduranceDetails]]]:
     return get_workouts()
