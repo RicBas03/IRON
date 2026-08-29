@@ -37,6 +37,16 @@ class Goal(SQLModel, table=True):
     target_date: Optional[date] = None
     active: bool = True
 
+# define planned sessions separately from completed workout history
+class PlannedWorkout(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    date: date
+    sport: str
+    workout_type: str
+    planned_duration: int
+    notes: Optional[str] = None
+    status: str = "planned"
+
 # define the database connection and engine for SQLite
 DATABASE_URL = "sqlite:///iron.db"
 
@@ -102,3 +112,57 @@ def replace_active_goals(goals: list[Goal]) -> list[Goal]:
             session.refresh(goal)
 
         return goals
+
+# persist a new planned workout
+def save_planned_workout(planned_workout: PlannedWorkout) -> PlannedWorkout:
+    with Session(engine) as session:
+        session.add(planned_workout)
+        session.commit()
+        session.refresh(planned_workout)
+        return planned_workout
+
+# retrieve planned workouts inside an inclusive date range
+def get_planned_workouts(
+    start_date: date,
+    end_date: date,
+) -> list[PlannedWorkout]:
+    with Session(engine) as session:
+        statement = (
+            select(PlannedWorkout)
+            .where(PlannedWorkout.date >= start_date)
+            .where(PlannedWorkout.date <= end_date)
+            .order_by(PlannedWorkout.date, PlannedWorkout.id)
+        )
+        return list(session.exec(statement).all())
+
+# update an existing planned workout without affecting completed workouts
+def update_planned_workout(
+    planned_workout: PlannedWorkout,
+) -> Optional[PlannedWorkout]:
+    with Session(engine) as session:
+        stored_workout = session.get(PlannedWorkout, planned_workout.id)
+        if stored_workout is None:
+            return None
+
+        stored_workout.date = planned_workout.date
+        stored_workout.sport = planned_workout.sport
+        stored_workout.workout_type = planned_workout.workout_type
+        stored_workout.planned_duration = planned_workout.planned_duration
+        stored_workout.notes = planned_workout.notes
+        stored_workout.status = planned_workout.status
+
+        session.add(stored_workout)
+        session.commit()
+        session.refresh(stored_workout)
+        return stored_workout
+
+# delete one planned workout by primary key
+def delete_planned_workout(planned_workout_id: int) -> bool:
+    with Session(engine) as session:
+        planned_workout = session.get(PlannedWorkout, planned_workout_id)
+        if planned_workout is None:
+            return False
+
+        session.delete(planned_workout)
+        session.commit()
+        return True
