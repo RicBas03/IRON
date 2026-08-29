@@ -43,7 +43,8 @@ class PlannedWorkout(SQLModel, table=True):
     date: date
     sport: str
     workout_type: str
-    planned_duration: int
+    target_duration: Optional[int] = None
+    target_distance: Optional[float] = None
     notes: Optional[str] = None
     status: str = "planned"
 
@@ -147,7 +148,8 @@ def update_planned_workout(
         stored_workout.date = planned_workout.date
         stored_workout.sport = planned_workout.sport
         stored_workout.workout_type = planned_workout.workout_type
-        stored_workout.planned_duration = planned_workout.planned_duration
+        stored_workout.target_duration = planned_workout.target_duration
+        stored_workout.target_distance = planned_workout.target_distance
         stored_workout.notes = planned_workout.notes
         stored_workout.status = planned_workout.status
 
