@@ -9,7 +9,6 @@ from database import replace_active_goals
 CATEGORY_ENDURANCE = "Endurance"
 CATEGORY_STRENGTH_MUSCLE = "Strength / Muscle"
 CATEGORY_BODY_COMPOSITION = "Body Composition"
-CATEGORY_GENERAL = "General"
 
 # goal types are grouped into categories for display and validation purposes
 GOAL_TYPES_BY_CATEGORY = {
@@ -31,10 +30,6 @@ GOAL_TYPES_BY_CATEGORY = {
     CATEGORY_BODY_COMPOSITION: (
         "Weight Loss",
         "Body Recomposition",
-    ),
-    CATEGORY_GENERAL: (
-        "General Fitness",
-        "Health / Maintenance",
     ),
 }
 

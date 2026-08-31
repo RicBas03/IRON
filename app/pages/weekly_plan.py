@@ -3,6 +3,8 @@
 from datetime import date, timedelta
 import streamlit as st
 from database import create_db_and_tables
+from decision_engine import get_recommended_options
+from goal_service import get_active_goals
 from planned_workout_service import (
     GYM_SPORT,
     MUSCLE_GROUPS,
@@ -39,6 +41,8 @@ if "weekly_plan_week_start" not in st.session_state:
 week_start = st.session_state["weekly_plan_week_start"]
 week_end = week_start + timedelta(days=6)
 planned_workouts = get_weekly_plan(week_start)
+active_goals = get_active_goals()
+recommended_options = get_recommended_options(active_goals)
 
 # render the calendar week with navigation buttons for previous and next weeks
 previous_column, period_column, next_column = st.columns([1, 5, 1])
@@ -94,6 +98,60 @@ for day_offset, column in enumerate(calendar_columns):
                     )
                 targets.append(planned_workout.status.title())
                 st.caption(" · ".join(targets))
+
+st.subheader("Recommended workouts")
+
+# render the recommended workouts with buttons to add them to the weekly plan
+if active_goals:
+    recommendation_columns = st.columns(3)
+    week_days = tuple(
+        week_start + timedelta(days=offset) for offset in range(7)
+    )
+
+    for index, (column, option) in enumerate(
+        zip(recommendation_columns, recommended_options)
+    ):
+        with column:
+            with st.container(border=True):
+                st.write(f"**{option.sport}**")
+                st.write(option.workout_type)
+                st.caption(f"Goal alignment: {option.score:g}%")
+                for reason in option.reasons:
+                    st.caption(reason)
+
+                recommended_date = st.selectbox(
+                    "Day",
+                    week_days,
+                    format_func=lambda selected_date: selected_date.strftime(
+                        "%A %d %b"
+                    ),
+                    key=f"recommendation_date_{week_start}_{index}",
+                )
+                add_recommendation = st.button(
+                    "Add to plan",
+                    key=f"add_recommendation_{week_start}_{index}",
+                    width="stretch",
+                )
+
+                if add_recommendation:
+                    try:
+                        create_planned_workout(
+                            workout_date=recommended_date,
+                            sport=option.sport,
+                            workout_type=option.workout_type,
+                            target_duration=None,
+                            target_distance=None,
+                            notes="",
+                        )
+                    except ValueError as error:
+                        st.error(str(error))
+                    else:
+                        st.session_state["weekly_plan_feedback"] = (
+                            f"Recommended {option.sport} workout added."
+                        )
+                        st.rerun()
+else:
+    st.info("Save active goals to receive workout recommendations.")
 
 st.subheader("Add planned workout")
 
