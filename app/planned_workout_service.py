@@ -1,20 +1,22 @@
 """Validation and orchestration for the athlete's weekly plan."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Optional
 from database import PlannedWorkout
 from database import delete_planned_workout as remove_planned_workout
 from database import get_planned_workouts, save_planned_workout
 from database import update_planned_workout as persist_planned_workout_update
-from workout_service import SUPPORTED_SPORTS
+from workout_service import (
+    ENTRY_PLANNED,
+    SUPPORTED_SPORTS,
+    classify_workout_datetime,
+)
 
 STATUS_PLANNED = "planned"
-STATUS_COMPLETED = "completed"
 STATUS_SKIPPED = "skipped"
 
 PLANNED_WORKOUT_STATUSES = (
     STATUS_PLANNED,
-    STATUS_COMPLETED,
     STATUS_SKIPPED,
 )
 
@@ -132,48 +134,62 @@ def validate_planned_workout(
 
 # persist a new planned workout
 def create_planned_workout(
-    workout_date: date,
+    workout_datetime: datetime,
     sport: str,
     workout_type: str,
     target_duration: Optional[int],
     target_distance: Optional[float],
     notes: str,
-    status: str = STATUS_PLANNED,
+    current_datetime: Optional[datetime] = None,
 ) -> PlannedWorkout:
+    if (
+        classify_workout_datetime(workout_datetime, current_datetime)
+        != ENTRY_PLANNED
+    ):
+        raise ValueError("A planned workout must be in the future.")
     normalized_workout_type = validate_planned_workout(
         sport,
         workout_type,
         target_duration,
         target_distance,
-        status,
+        STATUS_PLANNED,
     )
     planned_workout = PlannedWorkout(
-        date=workout_date,
+        scheduled_at=workout_datetime,
         sport=sport,
         workout_type=normalized_workout_type,
         target_duration=target_duration,
         target_distance=target_distance,
         notes=notes.strip() or None,
-        status=status,
+        status=STATUS_PLANNED,
     )
     return save_planned_workout(planned_workout)
 
 # return planned workouts for the reference date's calendar week
 def get_weekly_plan(reference_date: date) -> list[PlannedWorkout]:
-    week_start, week_end = get_week_range(reference_date)
-    return get_planned_workouts(week_start, week_end)
+    week_start, _ = get_week_range(reference_date)
+    start_at = datetime.combine(week_start, time.min)
+    end_at = start_at + timedelta(days=7)
+    return get_planned_workouts(start_at, end_at)
 
 # update an existing planned workout without affecting completed workouts
 def edit_planned_workout(
     planned_workout_id: int,
-    workout_date: date,
+    workout_datetime: datetime,
     sport: str,
     workout_type: str,
     target_duration: Optional[int],
     target_distance: Optional[float],
     notes: str,
     status: str,
+    current_datetime: Optional[datetime] = None,
 ) -> PlannedWorkout:
+    if (
+        status == STATUS_PLANNED
+        and classify_workout_datetime(workout_datetime, current_datetime)
+        != ENTRY_PLANNED
+    ):
+        raise ValueError("A planned workout must be in the future.")
     normalized_workout_type = validate_planned_workout(
         sport,
         workout_type,
@@ -183,7 +199,7 @@ def edit_planned_workout(
     )
     planned_workout = PlannedWorkout(
         id=planned_workout_id,
-        date=workout_date,
+        scheduled_at=workout_datetime,
         sport=sport,
         workout_type=normalized_workout_type,
         target_duration=target_duration,

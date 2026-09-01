@@ -1,15 +1,27 @@
-"""Validation and orchestration for workout operations."""
+"""Validation and orchestration for completed workout operations."""
 
-from datetime import date
+from datetime import date, datetime, time, timedelta
 from typing import Optional
 from database import EnduranceDetails, Workout, get_workouts, save_workout
 
 SUPPORTED_SPORTS = ("Run", "Bike", "Swim", "Gym")
 ENDURANCE_SPORTS = ("Run", "Bike", "Swim")
+ENTRY_COMPLETED = "completed"
+ENTRY_PLANNED = "planned"
+
+# classify a workout entry as completed or planned based on its datetime
+def classify_workout_datetime(
+    workout_datetime: datetime,
+    current_datetime: Optional[datetime] = None,
+) -> str:
+    reference_datetime = current_datetime or datetime.now()
+    if workout_datetime < reference_datetime:
+        return ENTRY_COMPLETED
+    return ENTRY_PLANNED
 
 # validate and persist a workout record, including optional endurance metadata
 def log_workout(
-    workout_date: date,
+    workout_datetime: datetime,
     sport: str,
     duration: int,
     rpe: int,
@@ -19,7 +31,13 @@ def log_workout(
     elevation_gain: Optional[float] = None,
     average_hr: Optional[int] = None,
     max_hr: Optional[int] = None,
+    current_datetime: Optional[datetime] = None,
 ) -> Workout:
+    if (
+        classify_workout_datetime(workout_datetime, current_datetime)
+        != ENTRY_COMPLETED
+    ):
+        raise ValueError("A completed workout must be in the past.")
     if sport not in SUPPORTED_SPORTS:
         raise ValueError("Choose a supported sport.")
     if duration <= 0:
@@ -62,7 +80,7 @@ def log_workout(
         raise ValueError("Endurance details are only valid for Run, Bike, and Swim.")
 
     workout = Workout(
-        date=workout_date,
+        performed_at=workout_datetime,
         sport=sport,
         duration=duration,
         rpe=rpe,
@@ -74,3 +92,12 @@ def log_workout(
 # expose workout history without leaking persistence into the UI
 def get_workout_history() -> list[tuple[Workout, Optional[EnduranceDetails]]]:
     return get_workouts()
+
+# expose completed workouts for a given week without leaking persistence into the UI
+def get_completed_workouts_for_week(
+    reference_date: date,
+) -> list[tuple[Workout, Optional[EnduranceDetails]]]:
+    week_start = reference_date - timedelta(days=reference_date.weekday())
+    start_at = datetime.combine(week_start, time.min)
+    end_at = start_at + timedelta(days=7)
+    return get_workouts(start_at, end_at)

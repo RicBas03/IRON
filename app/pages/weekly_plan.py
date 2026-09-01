@@ -1,6 +1,6 @@
-"""Streamlit page for manually managing the athlete's weekly plan."""
+"""Streamlit page for managing planned and completed weekly workouts."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 import streamlit as st
 from database import create_db_and_tables
 from decision_engine import get_recommended_options
@@ -17,34 +17,40 @@ from planned_workout_service import (
     get_week_range,
     get_weekly_plan,
 )
-from workout_service import SUPPORTED_SPORTS
+from workout_service import (
+    ENDURANCE_SPORTS,
+    ENTRY_COMPLETED,
+    SUPPORTED_SPORTS,
+    classify_workout_datetime,
+    get_completed_workouts_for_week,
+    log_workout,
+)
 
 create_db_and_tables()
 
 st.title("Weekly Plan")
 
-# display feedback message from previous operation, if any
 feedback_message = st.session_state.pop("weekly_plan_feedback", None)
 if feedback_message is not None:
     st.success(feedback_message)
 
-# change the week being displayed in the calendar
+# allow the user to navigate between weeks
 def change_week(days: int) -> None:
     st.session_state["weekly_plan_week_start"] += timedelta(days=days)
-    st.session_state.pop("new_planned_workout_date", None)
 
-# initialize the week being displayed in the calendar if not already set
+# initialize the week start date in session state if not already set
 if "weekly_plan_week_start" not in st.session_state:
     current_week_start, _ = get_week_range(date.today())
     st.session_state["weekly_plan_week_start"] = current_week_start
 
 week_start = st.session_state["weekly_plan_week_start"]
 week_end = week_start + timedelta(days=6)
+current_datetime = datetime.now()
 planned_workouts = get_weekly_plan(week_start)
+completed_workouts = get_completed_workouts_for_week(week_start)
 active_goals = get_active_goals()
 recommended_options = get_recommended_options(active_goals)
 
-# render the calendar week with navigation buttons for previous and next weeks
 previous_column, period_column, next_column = st.columns([1, 5, 1])
 with previous_column:
     st.button(
@@ -65,13 +71,21 @@ with next_column:
         args=(7,),
     )
 
-# group records once so each calendar column only renders its own day
-workouts_by_date = {
-    day: [workout for workout in planned_workouts if workout.date == day]
+calendar_items = [
+    (planned_workout.scheduled_at, "planned", planned_workout, None)
+    for planned_workout in planned_workouts
+] + [
+    (workout.performed_at, "completed", workout, details)
+    for workout, details in completed_workouts
+]
+calendar_items.sort(key=lambda item: item[0])
+
+items_by_date = {
+    day: [item for item in calendar_items if item[0].date() == day]
     for day in (week_start + timedelta(days=offset) for offset in range(7))
 }
 
-# render the calendar week with each day in its own column
+# display the weekly calendar with planned and completed workouts
 calendar_columns = st.columns(7)
 for day_offset, column in enumerate(calendar_columns):
     day = week_start + timedelta(days=day_offset)
@@ -79,33 +93,54 @@ for day_offset, column in enumerate(calendar_columns):
         st.markdown(f"**{day:%A}**")
         st.caption(f"{day:%d %b}")
 
-        if not workouts_by_date[day]:
+        if not items_by_date[day]:
             st.caption("No workout")
 
-        for planned_workout in workouts_by_date[day]:
+        for workout_datetime, entry_type, workout, details in items_by_date[day]:
             with st.container(border=True):
-                st.write(f"**{planned_workout.sport}**")
-                st.write(planned_workout.workout_type)
-                targets = []
-                if planned_workout.target_duration is not None:
-                    targets.append(f"{planned_workout.target_duration} min")
-                if planned_workout.target_distance is not None:
-                    distance_unit = (
-                        "m" if planned_workout.sport == "Swim" else "km"
-                    )
-                    targets.append(
-                        f"{planned_workout.target_distance:g} {distance_unit}"
-                    )
-                targets.append(planned_workout.status.title())
-                st.caption(" · ".join(targets))
+                st.write(f"**{workout.sport}**")
+                st.caption(workout_datetime.strftime("%H:%M"))
+
+                if entry_type == "planned":
+                    st.write(workout.workout_type)
+                    targets = []
+                    if workout.target_duration is not None:
+                        targets.append(f"{workout.target_duration} min")
+                    if workout.target_distance is not None:
+                        distance_unit = "m" if workout.sport == "Swim" else "km"
+                        targets.append(
+                            f"{workout.target_distance:g} {distance_unit}"
+                        )
+                    targets.append(workout.status.title())
+                    st.caption(" · ".join(targets))
+                else:
+                    st.write("Completed")
+                    actual_values = [f"{workout.duration} min", f"RPE {workout.rpe}"]
+                    if details is not None:
+                        distance_unit = "m" if workout.sport == "Swim" else "km"
+                        actual_values.append(
+                            f"{details.distance:g} {distance_unit}"
+                        )
+                    st.caption(" · ".join(actual_values))
 
 st.subheader("Recommended workouts")
 
-# render the recommended workouts with buttons to add them to the weekly plan
-if active_goals:
+future_week_days = tuple(
+    day
+    for day in (week_start + timedelta(days=offset) for offset in range(7))
+    if datetime.combine(day, time.max) >= current_datetime
+)
+
+# display recommended workouts for the week if there are active goals and future days
+if active_goals and future_week_days:
     recommendation_columns = st.columns(3)
-    week_days = tuple(
-        week_start + timedelta(days=offset) for offset in range(7)
+    default_recommendation_date = next(
+        (
+            day
+            for day in future_week_days
+            if datetime.combine(day, time(18, 0)) >= current_datetime
+        ),
+        future_week_days[-1],
     )
 
     for index, (column, option) in enumerate(
@@ -120,23 +155,32 @@ if active_goals:
                     st.caption(reason)
 
                 recommended_date = st.selectbox(
-                    "Day",
-                    week_days,
+                    "Date",
+                    future_week_days,
+                    index=future_week_days.index(default_recommendation_date),
                     format_func=lambda selected_date: selected_date.strftime(
                         "%A %d %b"
                     ),
                     key=f"recommendation_date_{week_start}_{index}",
                 )
-                add_recommendation = st.button(
+                recommended_time = st.time_input(
+                    "Time",
+                    value=time(18, 0),
+                    step=900,
+                    key=f"recommendation_time_{week_start}_{index}",
+                )
+
+                if st.button(
                     "Add to plan",
                     key=f"add_recommendation_{week_start}_{index}",
                     width="stretch",
-                )
-
-                if add_recommendation:
+                ):
                     try:
                         create_planned_workout(
-                            workout_date=recommended_date,
+                            workout_datetime=datetime.combine(
+                                recommended_date,
+                                recommended_time,
+                            ),
                             sport=option.sport,
                             workout_type=option.workout_type,
                             target_duration=None,
@@ -150,93 +194,159 @@ if active_goals:
                             f"Recommended {option.sport} workout added."
                         )
                         st.rerun()
-else:
+elif not active_goals:
     st.info("Save active goals to receive workout recommendations.")
+else:
+    st.info("This week has no future dates for workout recommendations.")
 
-st.subheader("Add planned workout")
+st.subheader("Add workout")
 
-new_sport = st.selectbox(
+# allow the user to add a planned or completed workout for the week
+default_entry_date = (
+    date.today() if week_start <= date.today() <= week_end else week_start
+)
+entry_date = st.date_input(
+    "Date",
+    value=default_entry_date,
+    min_value=week_start,
+    max_value=week_end,
+    key=f"workout_entry_date_{week_start}",
+)
+entry_time = st.time_input(
+    "Time",
+    value=time(18, 0),
+    step=900,
+    key=f"workout_entry_time_{week_start}",
+)
+entry_datetime = datetime.combine(entry_date, entry_time)
+entry_type = classify_workout_datetime(entry_datetime, current_datetime)
+entry_sport = st.selectbox(
     "Sport",
     SUPPORTED_SPORTS,
-    key="new_planned_workout_sport",
+    key="workout_entry_sport",
 )
 
-# render a form for adding a new planned workout
-with st.form("add_planned_workout"):
-    new_date = st.date_input(
-        "Date",
-        value=week_start,
-        min_value=week_start,
-        max_value=week_end,
-        key="new_planned_workout_date",
-    )
+# display the appropriate form based on whether the workout is planned or completed
+if entry_type == ENTRY_COMPLETED:
+    st.caption("The selected time is in the past: log a completed workout.")
 
-    if new_sport == GYM_SPORT:
-        new_muscle_groups = st.multiselect(
-            "Muscle groups",
-            MUSCLE_GROUPS,
-            key="new_planned_workout_muscle_groups",
+    with st.form("completed_workout_form"):
+        duration = st.number_input(
+            "Duration (minutes)",
+            min_value=1,
+            step=1,
         )
-        new_workout_type = ", ".join(new_muscle_groups)
-    else:
-        new_workout_type = st.selectbox(
-            "Workout type",
-            WORKOUT_TYPES_BY_SPORT[new_sport],
-            key=f"new_planned_workout_type_{new_sport}",
-        )
+        rpe = st.slider("RPE", min_value=1, max_value=10)
+        notes = st.text_area("Notes")
 
-    new_duration = st.number_input(
-        "Target duration (minutes, optional)",
-        min_value=1,
-        value=None,
-        step=1,
-        key="new_planned_workout_target_duration",
-    )
+        distance = None
+        elevation_gain = None
+        average_hr = None
+        max_hr = None
 
-    if new_sport == GYM_SPORT:
-        new_distance = None
-    else:
-        new_distance_unit = "m" if new_sport == "Swim" else "km"
-        new_distance = st.number_input(
-            f"Target distance ({new_distance_unit}, optional)",
-            min_value=1.0 if new_sport == "Swim" else 0.1,
+        if entry_sport in ENDURANCE_SPORTS:
+            distance_unit = "m" if entry_sport == "Swim" else "km"
+            distance = st.number_input(
+                f"Distance ({distance_unit})",
+                min_value=0.0,
+            )
+
+            if entry_sport != "Swim":
+                elevation_gain = st.number_input(
+                    "Elevation gain (m)",
+                    min_value=0.0,
+                    value=None,
+                )
+
+            average_hr = st.number_input(
+                "Average heart rate (bpm)",
+                min_value=1,
+                step=1,
+                value=None,
+            )
+            max_hr = st.number_input(
+                "Maximum heart rate (bpm)",
+                min_value=1,
+                step=1,
+                value=None,
+            )
+
+        completed_submitted = st.form_submit_button("Save completed workout")
+
+    if completed_submitted:
+        try:
+            workout = log_workout(
+                workout_datetime=entry_datetime,
+                sport=entry_sport,
+                duration=duration,
+                rpe=rpe,
+                notes=notes,
+                distance=distance,
+                elevation_gain=elevation_gain,
+                average_hr=average_hr,
+                max_hr=max_hr,
+            )
+        except ValueError as error:
+            st.error(str(error))
+        else:
+            st.session_state["weekly_plan_feedback"] = (
+                f"Completed workout #{workout.id} saved."
+            )
+            st.rerun()
+else:
+    st.caption("The selected time is in the future: add a planned workout.")
+
+    with st.form("planned_workout_form"):
+        if entry_sport == GYM_SPORT:
+            muscle_groups = st.multiselect("Muscle groups", MUSCLE_GROUPS)
+            workout_type = ", ".join(muscle_groups)
+        else:
+            workout_type = st.selectbox(
+                "Workout type",
+                WORKOUT_TYPES_BY_SPORT[entry_sport],
+            )
+
+        target_duration = st.number_input(
+            "Target duration (minutes, optional)",
+            min_value=1,
             value=None,
-            step=50.0 if new_sport == "Swim" else 0.1,
-            key=f"new_planned_workout_target_distance_{new_sport}",
+            step=1,
         )
 
-    new_notes = st.text_area("Notes", key="new_planned_workout_notes")
-    new_status = st.selectbox(
-        "Status",
-        PLANNED_WORKOUT_STATUSES,
-        format_func=str.title,
-        key="new_planned_workout_status",
-    )
-    add_submitted = st.form_submit_button("Add workout")
+        if entry_sport == GYM_SPORT:
+            target_distance = None
+        else:
+            distance_unit = "m" if entry_sport == "Swim" else "km"
+            target_distance = st.number_input(
+                f"Target distance ({distance_unit}, optional)",
+                min_value=1.0 if entry_sport == "Swim" else 0.1,
+                value=None,
+                step=50.0 if entry_sport == "Swim" else 0.1,
+            )
 
-# handle form submission for adding a new planned workout
-if add_submitted:
-    try:
-        created_workout = create_planned_workout(
-            workout_date=new_date,
-            sport=new_sport,
-            workout_type=new_workout_type,
-            target_duration=new_duration,
-            target_distance=new_distance,
-            notes=new_notes,
-            status=new_status,
-        )
-    except ValueError as error:
-        st.error(str(error))
-    else:
-        st.session_state["weekly_plan_feedback"] = (
-            f"Planned workout #{created_workout.id} added."
-        )
-        st.rerun()
+        planned_notes = st.text_area("Notes")
+        planned_submitted = st.form_submit_button("Add planned workout")
 
-st.subheader("Edit or delete")
+    if planned_submitted:
+        try:
+            planned_workout = create_planned_workout(
+                workout_datetime=entry_datetime,
+                sport=entry_sport,
+                workout_type=workout_type,
+                target_duration=target_duration,
+                target_distance=target_distance,
+                notes=planned_notes,
+            )
+        except ValueError as error:
+            st.error(str(error))
+        else:
+            st.session_state["weekly_plan_feedback"] = (
+                f"Planned workout #{planned_workout.id} added."
+            )
+            st.rerun()
 
-# render a selectbox for choosing a planned workout to edit or delete
+st.subheader("Edit or delete planned workout")
+
 if planned_workouts:
     planned_workouts_by_id = {
         workout.id: workout
@@ -247,7 +357,7 @@ if planned_workouts:
         "Planned workout",
         options=planned_workouts_by_id,
         format_func=lambda workout_id: (
-            f"{planned_workouts_by_id[workout_id].date:%a %d %b} · "
+            f"{planned_workouts_by_id[workout_id].scheduled_at:%a %d %b %H:%M} · "
             f"{planned_workouts_by_id[workout_id].sport} · "
             f"{planned_workouts_by_id[workout_id].workout_type}"
         ),
@@ -261,12 +371,17 @@ if planned_workouts:
         key=f"edited_sport_{selected_workout_id}",
     )
 
-    # render a form for editing or deleting the selected planned workout
     with st.form(f"edit_planned_workout_{selected_workout_id}"):
         edited_date = st.date_input(
             "Date",
-            value=selected_workout.date,
+            value=selected_workout.scheduled_at.date(),
             key=f"edited_date_{selected_workout_id}",
+        )
+        edited_time = st.time_input(
+            "Time",
+            value=selected_workout.scheduled_at.time(),
+            step=900,
+            key=f"edited_time_{selected_workout_id}",
         )
 
         if edited_sport == GYM_SPORT:
@@ -336,12 +451,11 @@ if planned_workouts:
         update_submitted = st.form_submit_button("Update workout")
         delete_submitted = st.form_submit_button("Delete workout")
 
-    # handle form submission for editing or deleting the selected planned workout
     if update_submitted:
         try:
             edit_planned_workout(
                 planned_workout_id=selected_workout_id,
-                workout_date=edited_date,
+                workout_datetime=datetime.combine(edited_date, edited_time),
                 sport=edited_sport,
                 workout_type=edited_workout_type,
                 target_duration=edited_duration,
@@ -355,7 +469,6 @@ if planned_workouts:
             st.session_state["weekly_plan_feedback"] = "Planned workout updated."
             st.rerun()
 
-    # handle form submission for deleting the selected planned workout
     if delete_submitted:
         try:
             delete_planned_workout(selected_workout_id)
