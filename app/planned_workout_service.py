@@ -4,7 +4,8 @@ from datetime import date, datetime, time, timedelta
 from typing import Optional
 from database import PlannedWorkout
 from database import delete_planned_workout as remove_planned_workout
-from database import get_planned_workouts, save_planned_workout
+from database import get_planned_workout_by_id, get_planned_workouts
+from database import save_planned_workout
 from database import update_planned_workout as persist_planned_workout_update
 from workout_service import (
     ENTRY_PLANNED,
@@ -171,6 +172,13 @@ def get_weekly_plan(reference_date: date) -> list[PlannedWorkout]:
     start_at = datetime.combine(week_start, time.min)
     end_at = start_at + timedelta(days=7)
     return get_planned_workouts(start_at, end_at)
+
+# retrieve a single planned workout by primary key
+def get_planned_workout(planned_workout_id: int) -> PlannedWorkout:
+    planned_workout = get_planned_workout_by_id(planned_workout_id)
+    if planned_workout is None:
+        raise ValueError("Planned workout not found.")
+    return planned_workout
 
 # update an existing planned workout without affecting completed workouts
 def edit_planned_workout(

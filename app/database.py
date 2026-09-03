@@ -97,6 +97,68 @@ def get_workouts(
         )
         return list(session.exec(statement).all())
 
+# retrieve a single workout with optional endurance details by primary key
+def get_workout_by_id(
+    workout_id: int,
+) -> Optional[tuple[Workout, Optional[EnduranceDetails]]]:
+    with Session(engine) as session:
+        statement = (
+            select(Workout, EnduranceDetails)
+            .join(EnduranceDetails, isouter=True)
+            .where(Workout.id == workout_id)
+        )
+        return session.exec(statement).first()
+
+# update an existing workout and optional endurance details atomically
+def update_workout(
+    workout: Workout,
+    endurance_details: Optional[EnduranceDetails],
+) -> Optional[Workout]:
+    with Session(engine) as session:
+        stored_workout = session.get(Workout, workout.id)
+        if stored_workout is None:
+            return None
+
+        stored_workout.performed_at = workout.performed_at
+        stored_workout.sport = workout.sport
+        stored_workout.duration = workout.duration
+        stored_workout.rpe = workout.rpe
+        stored_workout.notes = workout.notes
+        stored_workout.source = workout.source
+
+        stored_details = session.get(EnduranceDetails, workout.id)
+        if endurance_details is None and stored_details is not None:
+            session.delete(stored_details)
+        elif endurance_details is not None:
+            if stored_details is None:
+                endurance_details.workout_id = workout.id
+                session.add(endurance_details)
+            else:
+                stored_details.distance = endurance_details.distance
+                stored_details.elevation_gain = endurance_details.elevation_gain
+                stored_details.average_hr = endurance_details.average_hr
+                stored_details.max_hr = endurance_details.max_hr
+                session.add(stored_details)
+
+        session.add(stored_workout)
+        session.commit()
+        session.refresh(stored_workout)
+        return stored_workout
+
+# delete a workout and optional endurance details atomically
+def delete_workout(workout_id: int) -> bool:
+    with Session(engine) as session:
+        workout = session.get(Workout, workout_id)
+        if workout is None:
+            return False
+
+        endurance_details = session.get(EnduranceDetails, workout_id)
+        if endurance_details is not None:
+            session.delete(endurance_details)
+        session.delete(workout)
+        session.commit()
+        return True
+
 # retrieve active goals ordered by priority and id descending
 def get_active_goals() -> list[Goal]:
     with Session(engine) as session:
@@ -145,6 +207,13 @@ def get_planned_workouts(
             .order_by(PlannedWorkout.scheduled_at, PlannedWorkout.id)
         )
         return list(session.exec(statement).all())
+
+# retrieve a single planned workout by primary key
+def get_planned_workout_by_id(
+    planned_workout_id: int,
+) -> Optional[PlannedWorkout]:
+    with Session(engine) as session:
+        return session.get(PlannedWorkout, planned_workout_id)
 
 # update an existing planned workout without affecting completed workouts
 def update_planned_workout(

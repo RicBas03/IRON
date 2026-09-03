@@ -3,6 +3,9 @@
 from datetime import date, datetime, time, timedelta
 from typing import Optional
 from database import EnduranceDetails, Workout, get_workouts, save_workout
+from database import delete_workout as remove_workout
+from database import get_workout_by_id
+from database import update_workout as persist_workout_update
 
 SUPPORTED_SPORTS = ("Run", "Bike", "Swim", "Gym")
 ENDURANCE_SPORTS = ("Run", "Bike", "Swim")
@@ -19,8 +22,8 @@ def classify_workout_datetime(
         return ENTRY_COMPLETED
     return ENTRY_PLANNED
 
-# validate and persist a workout record, including optional endurance metadata
-def log_workout(
+# validate and persist a completed workout record, including optional endurance metadata
+def _build_completed_workout(
     workout_datetime: datetime,
     sport: str,
     duration: int,
@@ -31,13 +34,8 @@ def log_workout(
     elevation_gain: Optional[float] = None,
     average_hr: Optional[int] = None,
     max_hr: Optional[int] = None,
-    current_datetime: Optional[datetime] = None,
-) -> Workout:
-    if (
-        classify_workout_datetime(workout_datetime, current_datetime)
-        != ENTRY_COMPLETED
-    ):
-        raise ValueError("A completed workout must be in the past.")
+    workout_id: Optional[int] = None,
+) -> tuple[Workout, Optional[EnduranceDetails]]:
     if sport not in SUPPORTED_SPORTS:
         raise ValueError("Choose a supported sport.")
     if duration <= 0:
@@ -80,6 +78,7 @@ def log_workout(
         raise ValueError("Endurance details are only valid for Run, Bike, and Swim.")
 
     workout = Workout(
+        id=workout_id,
         performed_at=workout_datetime,
         sport=sport,
         duration=duration,
@@ -87,7 +86,92 @@ def log_workout(
         notes=notes.strip() or None,
         source=source.strip(),
     )
+    return workout, endurance_details
+
+# validate and persist a workout record, including optional endurance metadata
+def log_workout(
+    workout_datetime: datetime,
+    sport: str,
+    duration: int,
+    rpe: int,
+    notes: str,
+    source: str = "manual",
+    distance: Optional[float] = None,
+    elevation_gain: Optional[float] = None,
+    average_hr: Optional[int] = None,
+    max_hr: Optional[int] = None,
+    current_datetime: Optional[datetime] = None,
+) -> Workout:
+    if (
+        classify_workout_datetime(workout_datetime, current_datetime)
+        != ENTRY_COMPLETED
+    ):
+        raise ValueError("A completed workout must be in the past.")
+    workout, endurance_details = _build_completed_workout(
+        workout_datetime=workout_datetime,
+        sport=sport,
+        duration=duration,
+        rpe=rpe,
+        notes=notes,
+        source=source,
+        distance=distance,
+        elevation_gain=elevation_gain,
+        average_hr=average_hr,
+        max_hr=max_hr,
+    )
     return save_workout(workout, endurance_details)
+
+# expose completed workouts for a given week without leaking persistence into the UI
+def get_completed_workout(
+    workout_id: int,
+) -> tuple[Workout, Optional[EnduranceDetails]]:
+    workout_record = get_workout_by_id(workout_id)
+    if workout_record is None:
+        raise ValueError("Completed workout not found.")
+    return workout_record
+
+# update an existing completed workout record, including optional endurance metadata
+def edit_completed_workout(
+    workout_id: int,
+    workout_datetime: datetime,
+    sport: str,
+    duration: int,
+    rpe: int,
+    notes: str,
+    source: str = "manual",
+    distance: Optional[float] = None,
+    elevation_gain: Optional[float] = None,
+    average_hr: Optional[int] = None,
+    max_hr: Optional[int] = None,
+    current_datetime: Optional[datetime] = None,
+) -> Workout:
+    if (
+        classify_workout_datetime(workout_datetime, current_datetime)
+        != ENTRY_COMPLETED
+    ):
+        raise ValueError("A completed workout must be in the past.")
+    workout, endurance_details = _build_completed_workout(
+        workout_id=workout_id,
+        workout_datetime=workout_datetime,
+        sport=sport,
+        duration=duration,
+        rpe=rpe,
+        notes=notes,
+        source=source,
+        distance=distance,
+        elevation_gain=elevation_gain,
+        average_hr=average_hr,
+        max_hr=max_hr,
+    )
+    updated_workout = persist_workout_update(workout, endurance_details)
+    if updated_workout is None:
+        raise ValueError("Completed workout not found.")
+    return updated_workout
+
+# delete a completed workout record, including optional endurance metadata
+def delete_completed_workout(workout_id: int) -> None:
+    if not remove_workout(workout_id):
+        raise ValueError("Completed workout not found.")
 
 # expose workout history without leaking persistence into the UI
 def get_workout_history() -> list[tuple[Workout, Optional[EnduranceDetails]]]:
