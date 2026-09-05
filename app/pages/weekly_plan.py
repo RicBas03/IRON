@@ -53,6 +53,20 @@ st.markdown(
     div[class*="st-key-calendar_card_completed_"] button {
         border-left: 5px solid #21a366;
     }
+
+    div[class*="st-key-calendar_card_planned_completed_"] button {
+        border-left: 5px solid #21a366;
+    }
+
+    div[class*="st-key-calendar_card_planned_expired_"] button {
+        border-left: 5px solid #d98b2b;
+        opacity: 0.82;
+    }
+
+    div[class*="st-key-calendar_card_planned_skipped_"] button {
+        border-left: 5px solid #8b8b8b;
+        opacity: 0.72;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -74,8 +88,6 @@ if "weekly_plan_week_start" not in st.session_state:
 week_start = st.session_state["weekly_plan_week_start"]
 week_end = week_start + timedelta(days=6)
 current_datetime = datetime.now()
-planned_workouts = get_weekly_plan(week_start)
-completed_workouts = get_completed_workouts_for_week(week_start)
 active_goals = get_active_goals()
 recommended_options = get_recommended_options(active_goals)
 
@@ -99,26 +111,17 @@ with next_column:
         args=(7,),
     )
 
-calendar_items = [
-    (planned_workout.scheduled_at, "planned", planned_workout, None)
-    for planned_workout in planned_workouts
-] + [
-    (workout.performed_at, "completed", workout, details)
-    for workout, details in completed_workouts
-]
-calendar_items.sort(key=lambda item: item[0])
-
-items_by_date = {
-    day: [item for item in calendar_items if item[0].date() == day]
-    for day in (week_start + timedelta(days=offset) for offset in range(7))
-}
-
-calendar_title_column, add_workout_column = st.columns(
-    [10, 1],
+calendar_title_column, filter_column, add_workout_column = st.columns(
+    [8, 2, 1],
     vertical_alignment="center",
 )
 with calendar_title_column:
     st.subheader("Weekly calendar")
+with filter_column:
+    show_expired_workouts = st.toggle(
+        "Show expired",
+        value=False,
+    )
 with add_workout_column:
     if st.button(
         "+",
@@ -126,6 +129,33 @@ with add_workout_column:
         width="stretch",
     ):
         st.switch_page("pages/log_workout.py")
+
+planned_workouts = get_weekly_plan(
+    week_start,
+    include_expired=show_expired_workouts,
+    current_datetime=current_datetime,
+)
+completed_workouts = get_completed_workouts_for_week(week_start)
+
+linked_planned_workout_ids = {
+    planned_workout.id
+    for _, _, planned_workout in completed_workouts
+    if planned_workout is not None
+}
+calendar_items = [
+    (planned_workout.scheduled_at, "planned", planned_workout, None)
+    for planned_workout in planned_workouts
+    if planned_workout.id not in linked_planned_workout_ids
+] + [
+    (workout.performed_at, "completed", workout, details)
+    for workout, details, _ in completed_workouts
+]
+calendar_items.sort(key=lambda item: item[0])
+
+items_by_date = {
+    day: [item for item in calendar_items if item[0].date() == day]
+    for day in (week_start + timedelta(days=offset) for offset in range(7))
+}
 
 # display the weekly calendar with planned and completed workouts
 calendar_columns = st.columns(7, gap="small", border=True)
@@ -143,15 +173,15 @@ for day_offset, column in enumerate(calendar_columns):
             for workout_datetime, entry_type, workout, details in items_by_date[day]:
                 if entry_type == "planned":
                     workout_title = workout.workout_type
-                    workout_details = []
+                    card_lines = []
                     if workout.target_duration is not None:
-                        workout_details.append(f"{workout.target_duration} min")
+                        card_lines.append(f"{workout.target_duration} min")
                     if workout.target_distance is not None:
                         distance_unit = "m" if workout.sport == "Swim" else "km"
-                        workout_details.append(
+                        card_lines.append(
                             f"{workout.target_distance:g} {distance_unit}"
                         )
-                    workout_details.append(workout.status.title())
+                    card_lines.append(workout.status.title())
                 else:
                     workout_title = "Completed"
                     workout_details = [
@@ -163,8 +193,9 @@ for day_offset, column in enumerate(calendar_columns):
                         workout_details.append(
                             f"{details.distance:g} {distance_unit}"
                         )
+                    card_lines = [" · ".join(workout_details)]
 
-                details_text = " · ".join(workout_details)
+                details_text = "  \n".join(card_lines)
                 card_label = (
                     f"**{workout_datetime:%H:%M}  ·  {workout.sport}**\n\n"
                     f"{workout_title}\n\n"
@@ -172,7 +203,11 @@ for day_offset, column in enumerate(calendar_columns):
                 )
 
                 with st.container(
-                    key=f"calendar_card_{entry_type}_{workout.id}"
+                    key=(
+                        f"calendar_card_planned_{workout.status}_{workout.id}"
+                        if entry_type == "planned"
+                        else f"calendar_card_completed_{workout.id}"
+                    )
                 ):
                     if st.button(
                         card_label,
@@ -181,6 +216,7 @@ for day_offset, column in enumerate(calendar_columns):
                     ):
                         st.session_state["selected_workout_kind"] = entry_type
                         st.session_state["selected_workout_id"] = workout.id
+                        st.session_state["workout_edit_mode"] = False
                         st.switch_page("pages/edit_workout.py")
 
 st.subheader("Recommended workouts")

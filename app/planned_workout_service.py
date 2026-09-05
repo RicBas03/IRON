@@ -2,8 +2,15 @@
 
 from datetime import date, datetime, time, timedelta
 from typing import Optional
-from database import PlannedWorkout
+from database import (
+    STATUS_COMPLETED,
+    STATUS_EXPIRED,
+    STATUS_PLANNED,
+    STATUS_SKIPPED,
+    PlannedWorkout,
+)
 from database import delete_planned_workout as remove_planned_workout
+from database import expire_unmatched_planned_workouts
 from database import get_planned_workout_by_id, get_planned_workouts
 from database import save_planned_workout
 from database import update_planned_workout as persist_planned_workout_update
@@ -13,12 +20,11 @@ from workout_service import (
     classify_workout_datetime,
 )
 
-STATUS_PLANNED = "planned"
-STATUS_SKIPPED = "skipped"
-
 PLANNED_WORKOUT_STATUSES = (
     STATUS_PLANNED,
+    STATUS_COMPLETED,
     STATUS_SKIPPED,
+    STATUS_EXPIRED,
 )
 
 GYM_SPORT = "Gym"
@@ -167,11 +173,21 @@ def create_planned_workout(
     return save_planned_workout(planned_workout)
 
 # return planned workouts for the reference date's calendar week
-def get_weekly_plan(reference_date: date) -> list[PlannedWorkout]:
+def get_weekly_plan(
+    reference_date: date,
+    include_expired: bool = False,
+    current_datetime: Optional[datetime] = None,
+) -> list[PlannedWorkout]:
+    expire_unmatched_planned_workouts(
+        current_datetime or datetime.now(),
+        STATUS_PLANNED,
+        STATUS_EXPIRED,
+    )
     week_start, _ = get_week_range(reference_date)
     start_at = datetime.combine(week_start, time.min)
     end_at = start_at + timedelta(days=7)
-    return get_planned_workouts(start_at, end_at)
+    excluded_status = None if include_expired else STATUS_EXPIRED
+    return get_planned_workouts(start_at, end_at, excluded_status)
 
 # retrieve a single planned workout by primary key
 def get_planned_workout(planned_workout_id: int) -> PlannedWorkout:

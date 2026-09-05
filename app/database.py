@@ -1,8 +1,14 @@
 """SQLModel entities and persistence operations for IRON."""
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
+from sqlalchemy import inspect, text
 from sqlmodel import Field, SQLModel, Session, create_engine, select
+
+STATUS_PLANNED = "planned"
+STATUS_COMPLETED = "completed"
+STATUS_SKIPPED = "skipped"
+STATUS_EXPIRED = "expired"
 
 # define the database models for workouts, endurance details, and goals
 class Workout(SQLModel, table = True):
@@ -13,6 +19,10 @@ class Workout(SQLModel, table = True):
     rpe: int
     notes: Optional[str] = None
     source: str = "manual"
+    planned_workout_id: Optional[int] = Field(
+        default=None,
+        foreign_key="plannedworkout.id",
+    )
 
 # define the database model for endurance details, which are specific to Run, Bike, and Swim workouts
 class EnduranceDetails(SQLModel, table = True):
@@ -46,7 +56,7 @@ class PlannedWorkout(SQLModel, table=True):
     target_duration: Optional[int] = None
     target_distance: Optional[float] = None
     notes: Optional[str] = None
-    status: str = "planned"
+    status: str = STATUS_PLANNED
 
 # define the database connection and engine for SQLite
 DATABASE_URL = "sqlite:///iron.db"
@@ -57,11 +67,25 @@ engine = create_engine(DATABASE_URL)
 # create the database and tables if they do not exist
 def create_db_and_tables() -> None:
     SQLModel.metadata.create_all(engine)
+    with engine.begin() as connection:
+        workout_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns("workout")
+        }
+        if "planned_workout_id" not in workout_columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE workout "
+                    "ADD COLUMN planned_workout_id INTEGER "
+                    "REFERENCES plannedworkout(id)"
+                )
+            )
 
 # persist a workout and optional endurance details atomically
 def save_workout(
     workout: Workout,
     endurance_details: Optional[EnduranceDetails] = None,
+    matched_planned_workout: Optional[PlannedWorkout] = None,
 ) -> Workout:
     with Session(engine) as session:
         session.add(workout)
@@ -71,6 +95,8 @@ def save_workout(
         if endurance_details is not None:
             endurance_details.workout_id = workout.id
             session.add(endurance_details)
+        if matched_planned_workout is not None:
+            session.add(matched_planned_workout)
 
         session.commit()
         session.refresh(workout)
@@ -97,6 +123,64 @@ def get_workouts(
         )
         return list(session.exec(statement).all())
 
+# find a planned workout that matches the given datetime, sport, and allowed statuses
+def find_matching_planned_workout(
+    workout_datetime: datetime,
+    sport: str,
+    allowed_statuses: tuple[str, ...],
+) -> Optional[PlannedWorkout]:
+    day_start = workout_datetime.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+
+    with Session(engine) as session:
+        candidates = session.exec(
+            select(PlannedWorkout)
+            .where(PlannedWorkout.scheduled_at >= day_start)
+            .where(PlannedWorkout.scheduled_at < day_end)
+            .where(PlannedWorkout.sport == sport)
+            .where(PlannedWorkout.status.in_(allowed_statuses))
+            .order_by(PlannedWorkout.scheduled_at, PlannedWorkout.id)
+        ).all()
+
+        for candidate in candidates:
+            linked_workout = session.exec(
+                select(Workout).where(
+                    Workout.planned_workout_id == candidate.id
+                )
+            ).first()
+            if linked_workout is None:
+                session.expunge(candidate)
+                return candidate
+    return None
+
+# validate the planned workout parameters and return the normalized workout type
+def expire_unmatched_planned_workouts(
+    current_datetime: datetime,
+    planned_status: str,
+    expired_status: str,
+) -> int:
+    expired_count = 0
+    with Session(engine) as session:
+        planned_workouts = session.exec(
+            select(PlannedWorkout)
+            .where(PlannedWorkout.scheduled_at < current_datetime)
+            .where(PlannedWorkout.status == planned_status)
+        ).all()
+
+        for planned_workout in planned_workouts:
+            linked_workout = session.exec(
+                select(Workout).where(
+                    Workout.planned_workout_id == planned_workout.id
+                )
+            ).first()
+            if linked_workout is None:
+                planned_workout.status = expired_status
+                session.add(planned_workout)
+                expired_count += 1
+
+        session.commit()
+    return expired_count
+
 # retrieve a single workout with optional endurance details by primary key
 def get_workout_by_id(
     workout_id: int,
@@ -109,10 +193,52 @@ def get_workout_by_id(
         )
         return session.exec(statement).first()
 
+# retrieve a single workout together with its optional planned workout
+def get_workout_with_plan_by_id(
+    workout_id: int,
+) -> Optional[
+    tuple[Workout, Optional[EnduranceDetails], Optional[PlannedWorkout]]
+]:
+    with Session(engine) as session:
+        statement = (
+            select(Workout, EnduranceDetails, PlannedWorkout)
+            .join(EnduranceDetails, isouter=True)
+            .join(
+                PlannedWorkout,
+                Workout.planned_workout_id == PlannedWorkout.id,
+                isouter=True,
+            )
+            .where(Workout.id == workout_id)
+        )
+        return session.exec(statement).first()
+
+# retrieve workouts and their optional planned workout inside a date range
+def get_workouts_with_plans(
+    start_at: datetime,
+    end_at: datetime,
+) -> list[
+    tuple[Workout, Optional[EnduranceDetails], Optional[PlannedWorkout]]
+]:
+    with Session(engine) as session:
+        statement = (
+            select(Workout, EnduranceDetails, PlannedWorkout)
+            .join(EnduranceDetails, isouter=True)
+            .join(
+                PlannedWorkout,
+                Workout.planned_workout_id == PlannedWorkout.id,
+                isouter=True,
+            )
+            .where(Workout.performed_at >= start_at)
+            .where(Workout.performed_at < end_at)
+            .order_by(Workout.performed_at.desc(), Workout.id.desc())
+        )
+        return list(session.exec(statement).all())
+
 # update an existing workout and optional endurance details atomically
 def update_workout(
     workout: Workout,
     endurance_details: Optional[EnduranceDetails],
+    planned_workouts_to_update: tuple[PlannedWorkout, ...] = (),
 ) -> Optional[Workout]:
     with Session(engine) as session:
         stored_workout = session.get(Workout, workout.id)
@@ -125,6 +251,7 @@ def update_workout(
         stored_workout.rpe = workout.rpe
         stored_workout.notes = workout.notes
         stored_workout.source = workout.source
+        stored_workout.planned_workout_id = workout.planned_workout_id
 
         stored_details = session.get(EnduranceDetails, workout.id)
         if endurance_details is None and stored_details is not None:
@@ -140,13 +267,18 @@ def update_workout(
                 stored_details.max_hr = endurance_details.max_hr
                 session.add(stored_details)
 
+        for planned_workout in planned_workouts_to_update:
+            session.add(planned_workout)
         session.add(stored_workout)
         session.commit()
         session.refresh(stored_workout)
         return stored_workout
 
 # delete a workout and optional endurance details atomically
-def delete_workout(workout_id: int) -> bool:
+def delete_workout(
+    workout_id: int,
+    linked_planned_workout: Optional[PlannedWorkout] = None,
+) -> bool:
     with Session(engine) as session:
         workout = session.get(Workout, workout_id)
         if workout is None:
@@ -155,6 +287,8 @@ def delete_workout(workout_id: int) -> bool:
         endurance_details = session.get(EnduranceDetails, workout_id)
         if endurance_details is not None:
             session.delete(endurance_details)
+        if linked_planned_workout is not None:
+            session.add(linked_planned_workout)
         session.delete(workout)
         session.commit()
         return True
@@ -198,13 +332,21 @@ def save_planned_workout(planned_workout: PlannedWorkout) -> PlannedWorkout:
 def get_planned_workouts(
     start_at: datetime,
     end_at: datetime,
+    excluded_status: Optional[str] = None,
 ) -> list[PlannedWorkout]:
     with Session(engine) as session:
         statement = (
             select(PlannedWorkout)
             .where(PlannedWorkout.scheduled_at >= start_at)
             .where(PlannedWorkout.scheduled_at < end_at)
-            .order_by(PlannedWorkout.scheduled_at, PlannedWorkout.id)
+        )
+        if excluded_status is not None:
+            statement = statement.where(
+                PlannedWorkout.status != excluded_status
+            )
+        statement = statement.order_by(
+            PlannedWorkout.scheduled_at,
+            PlannedWorkout.id,
         )
         return list(session.exec(statement).all())
 

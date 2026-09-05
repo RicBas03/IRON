@@ -2,7 +2,20 @@
 
 from datetime import date, datetime, time, timedelta
 from typing import Optional
-from database import EnduranceDetails, Workout, get_workouts, save_workout
+from database import (
+    STATUS_COMPLETED,
+    STATUS_EXPIRED,
+    STATUS_PLANNED,
+    EnduranceDetails,
+    PlannedWorkout,
+    Workout,
+    find_matching_planned_workout,
+    get_planned_workout_by_id,
+    get_workout_with_plan_by_id,
+    get_workouts,
+    get_workouts_with_plans,
+    save_workout,
+)
 from database import delete_workout as remove_workout
 from database import get_workout_by_id
 from database import update_workout as persist_workout_update
@@ -35,6 +48,7 @@ def _build_completed_workout(
     average_hr: Optional[int] = None,
     max_hr: Optional[int] = None,
     workout_id: Optional[int] = None,
+    planned_workout_id: Optional[int] = None,
 ) -> tuple[Workout, Optional[EnduranceDetails]]:
     if sport not in SUPPORTED_SPORTS:
         raise ValueError("Choose a supported sport.")
@@ -85,8 +99,32 @@ def _build_completed_workout(
         rpe=rpe,
         notes=notes.strip() or None,
         source=source.strip(),
+        planned_workout_id=planned_workout_id,
     )
     return workout, endurance_details
+
+# find a planned workout that matches the given datetime and sport, and mark it as completed if found
+def _find_planned_workout_match(
+    workout_datetime: datetime,
+    sport: str,
+) -> Optional[PlannedWorkout]:
+    planned_workout = find_matching_planned_workout(
+        workout_datetime,
+        sport,
+        (STATUS_PLANNED, STATUS_EXPIRED),
+    )
+    if planned_workout is not None:
+        planned_workout.status = STATUS_COMPLETED
+    return planned_workout
+
+# determine the status of a planned workout when a completed workout is deleted or edited
+def _released_plan_status(
+    planned_workout: PlannedWorkout,
+    current_datetime: datetime,
+) -> str:
+    if planned_workout.scheduled_at < current_datetime:
+        return STATUS_EXPIRED
+    return STATUS_PLANNED
 
 # validate and persist a workout record, including optional endurance metadata
 def log_workout(
@@ -119,13 +157,32 @@ def log_workout(
         average_hr=average_hr,
         max_hr=max_hr,
     )
-    return save_workout(workout, endurance_details)
+    matched_planned_workout = _find_planned_workout_match(
+        workout_datetime,
+        sport,
+    )
+    if matched_planned_workout is not None:
+        workout.planned_workout_id = matched_planned_workout.id
+    return save_workout(
+        workout,
+        endurance_details,
+        matched_planned_workout,
+    )
 
 # expose completed workouts for a given week without leaking persistence into the UI
 def get_completed_workout(
     workout_id: int,
 ) -> tuple[Workout, Optional[EnduranceDetails]]:
     workout_record = get_workout_by_id(workout_id)
+    if workout_record is None:
+        raise ValueError("Completed workout not found.")
+    return workout_record
+
+# expose a completed workout together with its optional planned workout
+def get_completed_workout_context(
+    workout_id: int,
+) -> tuple[Workout, Optional[EnduranceDetails], Optional[PlannedWorkout]]:
+    workout_record = get_workout_with_plan_by_id(workout_id)
     if workout_record is None:
         raise ValueError("Completed workout not found.")
     return workout_record
@@ -145,13 +202,50 @@ def edit_completed_workout(
     max_hr: Optional[int] = None,
     current_datetime: Optional[datetime] = None,
 ) -> Workout:
+    reference_datetime = current_datetime or datetime.now()
     if (
-        classify_workout_datetime(workout_datetime, current_datetime)
+        classify_workout_datetime(workout_datetime, reference_datetime)
         != ENTRY_COMPLETED
     ):
         raise ValueError("A completed workout must be in the past.")
+    existing_workout, _ = get_completed_workout(workout_id)
+    planned_workouts_to_update = []
+    matched_planned_workout = None
+
+    if existing_workout.planned_workout_id is not None:
+        linked_planned_workout = get_planned_workout_by_id(
+            existing_workout.planned_workout_id
+        )
+        if linked_planned_workout is not None:
+            same_date = (
+                linked_planned_workout.scheduled_at.date()
+                == workout_datetime.date()
+            )
+            if same_date and linked_planned_workout.sport == sport:
+                matched_planned_workout = linked_planned_workout
+            else:
+                linked_planned_workout.status = _released_plan_status(
+                    linked_planned_workout,
+                    reference_datetime,
+                )
+                planned_workouts_to_update.append(linked_planned_workout)
+
+    if matched_planned_workout is None:
+        matched_planned_workout = _find_planned_workout_match(
+            workout_datetime,
+            sport,
+        )
+    if matched_planned_workout is not None:
+        matched_planned_workout.status = STATUS_COMPLETED
+        planned_workouts_to_update.append(matched_planned_workout)
+
     workout, endurance_details = _build_completed_workout(
         workout_id=workout_id,
+        planned_workout_id=(
+            matched_planned_workout.id
+            if matched_planned_workout is not None
+            else None
+        ),
         workout_datetime=workout_datetime,
         sport=sport,
         duration=duration,
@@ -163,14 +257,30 @@ def edit_completed_workout(
         average_hr=average_hr,
         max_hr=max_hr,
     )
-    updated_workout = persist_workout_update(workout, endurance_details)
+    updated_workout = persist_workout_update(
+        workout,
+        endurance_details,
+        tuple(planned_workouts_to_update),
+    )
     if updated_workout is None:
         raise ValueError("Completed workout not found.")
     return updated_workout
 
 # delete a completed workout record, including optional endurance metadata
 def delete_completed_workout(workout_id: int) -> None:
-    if not remove_workout(workout_id):
+    workout, _ = get_completed_workout(workout_id)
+    linked_planned_workout = None
+    if workout.planned_workout_id is not None:
+        linked_planned_workout = get_planned_workout_by_id(
+            workout.planned_workout_id
+        )
+        if linked_planned_workout is not None:
+            linked_planned_workout.status = _released_plan_status(
+                linked_planned_workout,
+                datetime.now(),
+            )
+
+    if not remove_workout(workout_id, linked_planned_workout):
         raise ValueError("Completed workout not found.")
 
 # expose workout history without leaking persistence into the UI
@@ -180,8 +290,10 @@ def get_workout_history() -> list[tuple[Workout, Optional[EnduranceDetails]]]:
 # expose completed workouts for a given week without leaking persistence into the UI
 def get_completed_workouts_for_week(
     reference_date: date,
-) -> list[tuple[Workout, Optional[EnduranceDetails]]]:
+) -> list[
+    tuple[Workout, Optional[EnduranceDetails], Optional[PlannedWorkout]]
+]:
     week_start = reference_date - timedelta(days=reference_date.weekday())
     start_at = datetime.combine(week_start, time.min)
     end_at = start_at + timedelta(days=7)
-    return get_workouts(start_at, end_at)
+    return get_workouts_with_plans(start_at, end_at)

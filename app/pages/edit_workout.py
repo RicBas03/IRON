@@ -1,8 +1,8 @@
-"""Streamlit page for editing or deleting a selected calendar workout."""
+"""Streamlit page for viewing and optionally editing a calendar workout."""
 
 from datetime import datetime
 import streamlit as st
-from database import create_db_and_tables
+from database import EnduranceDetails, PlannedWorkout, Workout, create_db_and_tables
 from planned_workout_service import (
     GYM_SPORT,
     MUSCLE_GROUPS,
@@ -18,18 +18,86 @@ from workout_service import (
     SUPPORTED_SPORTS,
     delete_completed_workout,
     edit_completed_workout,
-    get_completed_workout,
+    get_completed_workout_context,
 )
+
+# functions to display workout details
+def show_planned_workout_details(planned_workout: PlannedWorkout) -> None:
+    """Display all persisted information for a planned workout."""
+    distance_unit = "m" if planned_workout.sport == "Swim" else "km"
+    target_duration = (
+        f"{planned_workout.target_duration} min"
+        if planned_workout.target_duration is not None
+        else "Not set"
+    )
+    target_distance = (
+        f"{planned_workout.target_distance:g} {distance_unit}"
+        if planned_workout.target_distance is not None
+        else "Not set"
+    )
+
+    st.subheader("Planned workout")
+    with st.container(border=True):
+        st.write(f"**Sport:** {planned_workout.sport}")
+        st.write(f"**Workout type:** {planned_workout.workout_type}")
+        st.write(
+            f"**Date and time:** "
+            f"{planned_workout.scheduled_at:%A %d %B %Y at %H:%M}"
+        )
+        st.write(f"**Target duration:** {target_duration}")
+        if planned_workout.sport != GYM_SPORT:
+            st.write(f"**Target distance:** {target_distance}")
+        st.write(f"**Status:** {planned_workout.status.title()}")
+        st.write(f"**Notes:** {planned_workout.notes or '—'}")
+
+# functions to display completed workout details
+def show_completed_workout_details(
+    workout: Workout,
+    endurance_details: EnduranceDetails | None,
+) -> None:
+    """Display all persisted information for a completed workout."""
+    st.subheader("Completed workout")
+    with st.container(border=True):
+        st.write(f"**Sport:** {workout.sport}")
+        st.write(f"**Date and time:** {workout.performed_at:%A %d %B %Y at %H:%M}")
+        st.write(f"**Duration:** {workout.duration} min")
+        st.write(f"**RPE:** {workout.rpe}")
+
+        if endurance_details is not None:
+            distance_unit = "m" if workout.sport == "Swim" else "km"
+            st.write(
+                f"**Distance:** {endurance_details.distance:g} {distance_unit}"
+            )
+            if workout.sport != "Swim":
+                elevation_gain = (
+                    f"{endurance_details.elevation_gain:g} m"
+                    if endurance_details.elevation_gain is not None
+                    else "Not set"
+                )
+                st.write(f"**Elevation gain:** {elevation_gain}")
+            st.write(
+                f"**Average heart rate:** "
+                f"{endurance_details.average_hr or 'Not set'}"
+            )
+            st.write(
+                f"**Maximum heart rate:** "
+                f"{endurance_details.max_hr or 'Not set'}"
+            )
+
+        st.write(f"**Notes:** {workout.notes or '—'}")
+        st.write(f"**Source:** {workout.source}")
 
 create_db_and_tables()
 
 if st.button("← Weekly Plan"):
+    st.session_state["workout_edit_mode"] = False
     st.switch_page("pages/weekly_plan.py")
 
-st.title("Edit Workout")
+st.title("Workout Details")
 
 workout_kind = st.session_state.get("selected_workout_kind")
 workout_id = st.session_state.get("selected_workout_id")
+edit_mode = st.session_state.get("workout_edit_mode", False)
 
 if workout_kind not in ("planned", "completed") or workout_id is None:
     st.info("Select a workout from the Weekly Plan calendar.")
@@ -41,6 +109,18 @@ if workout_kind == "planned":
     except ValueError as error:
         st.error(str(error))
         st.stop()
+
+    if not edit_mode:
+        show_planned_workout_details(planned_workout)
+        if st.button("Edit"):
+            st.session_state["workout_edit_mode"] = True
+            st.rerun()
+        st.stop()
+
+    st.subheader("Edit details")
+    if st.button("Cancel"):
+        st.session_state["workout_edit_mode"] = False
+        st.rerun()
 
     edited_sport = st.selectbox(
         "Sport",
@@ -122,6 +202,7 @@ if workout_kind == "planned":
         except ValueError as error:
             st.error(str(error))
         else:
+            st.session_state["workout_edit_mode"] = False
             st.session_state["weekly_plan_feedback"] = "Planned workout deleted."
             st.switch_page("pages/weekly_plan.py")
 
@@ -140,14 +221,33 @@ if workout_kind == "planned":
         except ValueError as error:
             st.error(str(error))
         else:
+            st.session_state["workout_edit_mode"] = False
             st.session_state["weekly_plan_feedback"] = "Planned workout updated."
             st.switch_page("pages/weekly_plan.py")
 else:
     try:
-        completed_workout, endurance_details = get_completed_workout(workout_id)
+        (
+            completed_workout,
+            endurance_details,
+            linked_planned_workout,
+        ) = get_completed_workout_context(workout_id)
     except ValueError as error:
         st.error(str(error))
         st.stop()
+
+    if not edit_mode:
+        show_completed_workout_details(completed_workout, endurance_details)
+        if linked_planned_workout is not None:
+            show_planned_workout_details(linked_planned_workout)
+        if st.button("Edit"):
+            st.session_state["workout_edit_mode"] = True
+            st.rerun()
+        st.stop()
+
+    st.subheader("Edit details")
+    if st.button("Cancel"):
+        st.session_state["workout_edit_mode"] = False
+        st.rerun()
 
     edited_sport = st.selectbox(
         "Sport",
@@ -238,6 +338,7 @@ else:
         except ValueError as error:
             st.error(str(error))
         else:
+            st.session_state["workout_edit_mode"] = False
             st.session_state["weekly_plan_feedback"] = "Completed workout deleted."
             st.switch_page("pages/weekly_plan.py")
 
@@ -259,5 +360,6 @@ else:
         except ValueError as error:
             st.error(str(error))
         else:
+            st.session_state["workout_edit_mode"] = False
             st.session_state["weekly_plan_feedback"] = "Completed workout updated."
             st.switch_page("pages/weekly_plan.py")
